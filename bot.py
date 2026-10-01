@@ -631,7 +631,7 @@ async def got_receipt(message: Message, bot: Bot) -> None:
               receipt_file_id=file_id, receipt_type=file_type)
     app = db_get(app["id"])
     await message.answer(
-        "✅ Chekingiz qabul qilindi va administrator tekshiruviga yuborildi.\n\n"
+        f"✅ Ariza №{app['id']}: chekingiz qabul qilindi va administrator tekshiruviga yuborildi.\n\n"
         "Natija tasdiqlangach, sizga bot orqali xabar keladi.",
         reply_markup=main_kb(),
     )
@@ -689,10 +689,10 @@ async def admin_payment(call: CallbackQuery, bot: Bot) -> None:
 async def fallback(message: Message) -> None:
     app = db_latest(message.from_user.id)
     hints = {
-        ST_RECEIPT: "Iltimos, to'lov chekini rasm yoki PDF fayl ko'rinishida yuboring.",
-        ST_REVIEW: "⏳ Chekingiz administrator tekshiruvida. Iltimos, natijani kuting.",
+        ST_RECEIPT: "Ariza №{id}: iltimos, to'lov chekini rasm yoki PDF fayl ko'rinishida yuboring.",
+        ST_REVIEW: "⏳ Ariza №{id}: chekingiz administrator tekshiruvida. Iltimos, natijani kuting.",
     }
-    text = hints.get(app["state"]) if app else None
+    text = hints[app["state"]].format(id=app["id"]) if app and app["state"] in hints else None
     await message.answer(text or f"Maqola topshirish uchun «{BTN_NEW}» tugmasini bosing.", reply_markup=main_kb())
 
 
