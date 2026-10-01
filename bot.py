@@ -251,21 +251,27 @@ FIO_RE = re.compile(r"^[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼʻ'’\-]+(\s+[A-Z
 e = html.escape
 
 
-def form_summary(data: dict) -> str:
+def cut(value: str, limit: int | None) -> str:
+    if limit and len(value) > limit:
+        value = value[:limit].rstrip() + "…"
+    return e(value)
+
+
+def form_summary(data: dict, limit: int | None = None) -> str:
     return (
-        f"👤 <b>F.I.Sh.:</b> {e(data['full_name'])}\n"
-        f"🎓 <b>Maqomi:</b> {e(data['author_status'])}\n"
-        f"🏢 <b>Ish/o'qish joyi:</b> {e(data['workplace'])}\n"
-        f"📝 <b>Maqola mavzusi:</b> {e(data['topic'])}\n"
-        f"🔬 <b>Ilmiy soha:</b> {e(data['field'])}\n"
-        f"🌐 <b>Til:</b> {e(data['language'])}"
+        f"👤 <b>F.I.Sh.:</b> {cut(data['full_name'], limit)}\n"
+        f"🎓 <b>Maqomi:</b> {cut(data['author_status'], limit)}\n"
+        f"🏢 <b>Ish/o'qish joyi:</b> {cut(data['workplace'], limit)}\n"
+        f"📝 <b>Maqola mavzusi:</b> {cut(data['topic'], limit)}\n"
+        f"🔬 <b>Ilmiy soha:</b> {cut(data['field'], limit)}\n"
+        f"🌐 <b>Til:</b> {cut(data['language'], limit)}"
     )
 
 
-def app_summary(app: sqlite3.Row) -> str:
+def app_summary(app: sqlite3.Row, limit: int | None = None) -> str:
     return (
         f"📌 <b>Ariza №{app['id']}</b>\n\n"
-        f"{form_summary(dict(app))}\n\n"
+        f"{form_summary(dict(app), limit)}\n\n"
         f"💳 <b>To'lov:</b> {e(app['payment_status'])}\n"
         f"📄 <b>Maqola:</b> {e(app['article_status'])}\n"
         f"📍 <b>Holat:</b> {STATE_LABELS.get(app['state'], app['state'])}"
@@ -294,15 +300,31 @@ def is_editor(chat_id: int, user_id: int) -> bool:
     return chat_id in EDITOR_CHAT_IDS or user_id in EDITOR_CHAT_IDS
 
 
-async def notify_editors(bot: Bot, text: str, file_id: str | None = None, file_type: str | None = None,
-                         caption: str = "", reply_markup: InlineKeyboardMarkup | None = None) -> None:
-    """Отправляет редакторам текст заявки и (опционально) файл с кнопками под ним."""
+CAPTION_LIMIT = 1024  # лимит подписи к медиа в Telegram (в UTF-16 символах, без HTML-тегов)
+
+
+def caption_len(text: str) -> int:
+    plain = html.unescape(re.sub(r"<[^>]+>", "", text))
+    return len(plain.encode("utf-16-le")) // 2
+
+
+def app_caption(title: str, app: sqlite3.Row) -> str:
+    """Заголовок + данные заявки, сокращённые так, чтобы влезть в подпись к фото/файлу."""
+    for limit in (None, 200, 120, 60):
+        text = f"{title}\n\n{app_summary(app, limit)}\n\n👤 Telegram: {user_contact(app)}"
+        if caption_len(text) <= CAPTION_LIMIT:
+            return text
+    return text
+
+
+async def notify_editors(bot: Bot, caption: str, file_id: str, file_type: str,
+                         reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    """Отправляет редакторам файл (фото/документ) с данными заявки в подписи — одним сообщением."""
     for chat_id in EDITOR_CHAT_IDS:
         try:
-            await bot.send_message(chat_id, text, reply_markup=None if file_id else reply_markup)
             if file_type == "photo":
                 await bot.send_photo(chat_id, file_id, caption=caption, reply_markup=reply_markup)
-            elif file_type == "document":
+            else:
                 await bot.send_document(chat_id, file_id, caption=caption, reply_markup=reply_markup)
         except Exception:
             logging.exception("Редактору %s не удалось отправить сообщение", chat_id)
@@ -599,10 +621,7 @@ async def got_receipt(message: Message, bot: Bot, app: sqlite3.Row) -> None:
         reply_markup=main_kb(),
     )
     await notify_editors(
-        bot,
-        f"💳 <b>YANGI TO'LOV CHEKI</b>\n\n{app_summary(app)}\n\n👤 Telegram: {user_contact(app)}",
-        file_id, file_type,
-        caption=f"Ariza №{app['id']} — to'lov cheki",
+        bot, app_caption("💳 <b>YANGI TO'LOV CHEKI</b>", app), file_id, file_type,
         reply_markup=payment_admin_kb(app["id"]),
     )
 
@@ -621,12 +640,7 @@ async def got_article(message: Message, bot: Bot, app: sqlite3.Row) -> None:
         "Maqolangiz tahririyat tomonidan ko'rib chiqiladi.",
         reply_markup=main_kb(),
     )
-    await notify_editors(
-        bot,
-        f"📄 <b>YANGI MAQOLA QABUL QILINDI</b>\n\n{app_summary(app)}\n\n👤 Telegram: {user_contact(app)}",
-        doc.file_id, "document",
-        caption=f"Ariza №{app['id']} — maqola",
-    )
+    await notify_editors(bot, app_caption("📄 <b>YANGI MAQOLA QABUL QILINDI</b>", app), doc.file_id, "document")
 
 
 # ---------- Решение администратора по оплате ----------
