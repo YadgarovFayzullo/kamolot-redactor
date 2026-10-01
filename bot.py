@@ -4,7 +4,7 @@
   1. Анкета автора (FSM): ФИО → статус → место работы → тема → область науки → язык
   2. Подтверждение анкеты → заявка сохраняется в БД, автору показываются реквизиты оплаты
   3. Автор отправляет чек (фото / PDF) → администратор подтверждает или отклоняет
-  4. После подтверждения оплаты автор отправляет статью (DOC / DOCX) → заявка принята
+  4. После подтверждения оплаты автору сообщается, что статья в работе — заявка завершена
 
 Этапы 3–4 хранятся в SQLite, поэтому переживают перезапуск бота.
 """
@@ -43,9 +43,10 @@ EDITOR_CHAT_IDS = [int(x) for x in os.getenv("EDITOR_CHAT_IDS", "").replace(" ",
 DB_PATH = os.getenv("DB_PATH", "orders.db")
 
 JOURNAL_NAME = os.getenv("JOURNAL_NAME", "Pedagogika va Psixologiya. Ilmiy-nazariy va metodik jurnal")
-PAYMENT_AMOUNT = os.getenv("PAYMENT_AMOUNT", "150 000 so'm")
+PAYMENT_AMOUNT = os.getenv("PAYMENT_AMOUNT", "130 000 so'm")
 CARD_NUMBER = os.getenv("CARD_NUMBER", "")
 CARD_HOLDER = os.getenv("CARD_HOLDER", "")
+SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "nayimov_82").lstrip("@")
 
 AUTHOR_STATUSES = [
     ["Professor", "Dotsent"],
@@ -79,7 +80,7 @@ SCIENCE_FIELDS = [
 # Состояния заявки в БД
 ST_RECEIPT = "receipt"          # ждём чек
 ST_REVIEW = "payment_review"    # чек у администратора
-ST_ARTICLE = "article"          # оплата подтверждена, ждём статью
+ST_ARTICLE = "article"          # устаревшее: раньше ждали файл статьи
 ST_DONE = "done"
 ST_CANCELLED = "cancelled"
 
@@ -87,13 +88,13 @@ STATE_LABELS = {
     ST_RECEIPT: "💳 To'lov cheki kutilmoqda",
     ST_REVIEW: "⏳ Chek tekshirilmoqda",
     ST_ARTICLE: "📄 Maqola fayli kutilmoqda",
-    ST_DONE: "✅ Maqola qabul qilingan",
+    ST_DONE: "✅ To'lov tasdiqlangan",
     ST_CANCELLED: "❌ Bekor qilingan",
 }
 
 BTN_NEW = "📝 Maqola topshirish"
-BTN_STATUS = "📊 Maqola holati"
 BTN_CANCEL = "❌ Bekor qilish"
+BTN_SUPPORT = "🆘 Yordam"
 
 router = Router()
 
@@ -102,6 +103,7 @@ router = Router()
 
 class Form(StatesGroup):
     full_name = State()
+    phone = State()
     author_status = State()
     workplace = State()
     topic = State()
@@ -111,7 +113,7 @@ class Form(StatesGroup):
     confirm = State()
 
 
-FORM_ORDER = ["full_name", "author_status", "workplace", "topic", "field", "language"]
+FORM_ORDER = ["full_name", "phone", "author_status", "workplace", "topic", "field", "language"]
 
 
 # ---------- База данных ----------
@@ -151,16 +153,19 @@ def db_init() -> None:
             )
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(applications)")}
+        if "phone" not in columns:
+            conn.execute("ALTER TABLE applications ADD COLUMN phone TEXT NOT NULL DEFAULT ''")
 
 
 def db_create_application(user_id: int, username: str | None, data: dict) -> int:
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO applications (telegram_id, username, full_name, author_status, workplace, "
-            "topic, field, language, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO applications (telegram_id, username, full_name, phone, author_status, workplace, "
+            "topic, field, language, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 user_id, username or "",
-                data["full_name"], data["author_status"], data["workplace"],
+                data["full_name"], data["phone"], data["author_status"], data["workplace"],
                 data["topic"], data["field"], data["language"],
                 ST_RECEIPT, now_str(), now_str(),
             ),
@@ -201,11 +206,21 @@ def reply_kb(rows: list[list[str]]) -> ReplyKeyboardMarkup:
 
 
 def main_kb() -> ReplyKeyboardMarkup:
-    return reply_kb([[BTN_NEW], [BTN_STATUS]])
+    return reply_kb([[BTN_NEW], [BTN_SUPPORT]])
 
 
 def cancel_kb() -> ReplyKeyboardMarkup:
     return reply_kb([[BTN_CANCEL]])
+
+
+def phone_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 Telefon raqamni yuborish", request_contact=True)],
+            [KeyboardButton(text=BTN_CANCEL)],
+        ],
+        resize_keyboard=True,
+    )
 
 
 def fields_kb() -> InlineKeyboardMarkup:
@@ -223,8 +238,9 @@ def confirm_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✅ Tasdiqlash va to'lovga o'tish", callback_data="confirm:send")],
         [
             InlineKeyboardButton(text="✏️ F.I.Sh.", callback_data="edit:full_name"),
-            InlineKeyboardButton(text="✏️ Maqom", callback_data="edit:author_status"),
+            InlineKeyboardButton(text="✏️ Telefon", callback_data="edit:phone"),
         ],
+        [InlineKeyboardButton(text="✏️ Maqom", callback_data="edit:author_status")],
         [
             InlineKeyboardButton(text="✏️ Ish joyi", callback_data="edit:workplace"),
             InlineKeyboardButton(text="✏️ Mavzu", callback_data="edit:topic"),
@@ -254,6 +270,7 @@ e = html.escape
 def form_summary(data: dict) -> str:
     return (
         f"👤 <b>F.I.Sh.:</b> {e(data['full_name'])}\n"
+        f"📱 <b>Telefon:</b> {e(data.get('phone') or '-')}\n"
         f"🎓 <b>Maqomi:</b> {e(data['author_status'])}\n"
         f"🏢 <b>Ish/o'qish joyi:</b> {e(data['workplace'])}\n"
         f"📝 <b>Maqola mavzusi:</b> {e(data['topic'])}\n"
@@ -265,10 +282,7 @@ def form_summary(data: dict) -> str:
 def app_summary(app: sqlite3.Row) -> str:
     return (
         f"📌 <b>Ariza №{app['id']}</b>\n\n"
-        f"{form_summary(dict(app))}\n\n"
-        f"💳 <b>To'lov:</b> {e(app['payment_status'])}\n"
-        f"📄 <b>Maqola:</b> {e(app['article_status'])}\n"
-        f"📍 <b>Holat:</b> {STATE_LABELS.get(app['state'], app['state'])}"
+        f"{form_summary(dict(app))}"
     )
 
 
@@ -319,6 +333,14 @@ async def ask(message: Message, state: FSMContext, step: str) -> None:
             head + "Muallifning familiyasi, ismi va otasining ismini to'liq kiriting.\n\n"
             "<i>Nayimov Azizbek Alisherovich</i>",
             reply_markup=cancel_kb(),
+        )
+    elif step == "phone":
+        await state.set_state(Form.phone)
+        await message.answer(
+            head + "Telefon raqamingizni yuboring — tahririyat siz bilan shu raqam orqali bog'lanadi.\n\n"
+            "Pastdagi «📱 Telefon raqamni yuborish» tugmasini bosing yoki raqamni yozing.\n"
+            "<i>Masalan: +998 90 123 45 67</i>",
+            reply_markup=phone_kb(),
         )
     elif step == "author_status":
         await state.set_state(Form.author_status)
@@ -386,10 +408,20 @@ async def cmd_help(message: Message) -> None:
         "Botdan foydalanish:\n\n"
         "/start — bosh menyu\n"
         "/new — yangi maqola topshirish\n"
-        "/status — maqola holatini tekshirish\n"
-        "/cancel — joriy jarayonni bekor qilish\n\n"
-        "Savollarga ketma-ket javob bering. To'lov chekini rasm yoki PDF, "
-        "maqolani DOC yoki DOCX ko'rinishida yuboring."
+        "/cancel — joriy jarayonni bekor qilish\n"
+        f"/support — administrator bilan bog'lanish (@{e(SUPPORT_USERNAME)})\n\n"
+        "Savollarga ketma-ket javob bering. To'lov chekini rasm yoki PDF ko'rinishida yuboring."
+    )
+
+
+@router.message(Command("support"))
+@router.message(F.text == BTN_SUPPORT)
+async def cmd_support(message: Message) -> None:
+    await message.answer(
+        f"Savollar bo'yicha administratorga yozing: @{e(SUPPORT_USERNAME)}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✉️ Administratorga yozish", url=f"https://t.me/{SUPPORT_USERNAME}")
+        ]]),
     )
 
 
@@ -408,25 +440,7 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 @router.message(F.text == BTN_NEW)
 async def cmd_new(message: Message, state: FSMContext) -> None:
     await state.clear()
-    app = db_latest(message.from_user.id)
-    if app and app["state"] in (ST_REVIEW, ST_ARTICLE):
-        await message.answer(
-            f"Sizda tugallanmagan ariza №{app['id']} bor: {STATE_LABELS[app['state']]}.\n"
-            "Avval uni yakunlang yoki /status orqali holatini tekshiring.",
-            reply_markup=main_kb(),
-        )
-        return
     await ask(message, state, "full_name")
-
-
-@router.message(Command("status"))
-@router.message(F.text == BTN_STATUS)
-async def cmd_status(message: Message) -> None:
-    app = db_latest(message.from_user.id)
-    if not app:
-        await message.answer("Sizda hali ariza mavjud emas.", reply_markup=main_kb())
-        return
-    await message.answer(app_summary(app), reply_markup=main_kb())
 
 
 @router.message(Command("myid"))
@@ -462,6 +476,33 @@ async def got_full_name(message: Message, state: FSMContext) -> None:
         )
         return
     await save_and_next(message, state, full_name=value)
+
+
+@router.message(Form.phone, F.contact)
+async def got_phone_contact(message: Message, state: FSMContext) -> None:
+    contact = message.contact
+    if contact.user_id and contact.user_id != message.from_user.id:
+        await message.answer("Iltimos, o'zingizning raqamingizni tugma orqali yuboring.", reply_markup=phone_kb())
+        return
+    phone = contact.phone_number
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    await save_and_next(message, state, phone=phone)
+
+
+@router.message(Form.phone, F.text)
+async def got_phone_text(message: Message, state: FSMContext) -> None:
+    digits = re.sub(r"\D", "", message.text)
+    if not 9 <= len(digits) <= 15:
+        await message.answer(
+            "Telefon raqami noto'g'ri. Tugma orqali yuboring yoki to'liq yozing.\n"
+            "<i>Masalan: +998 90 123 45 67</i>",
+            reply_markup=phone_kb(),
+        )
+        return
+    if len(digits) == 9:  # местный номер без кода страны
+        digits = "998" + digits
+    await save_and_next(message, state, phone="+" + digits)
 
 
 @router.message(Form.author_status, F.text)
@@ -560,27 +601,23 @@ async def confirm_use_buttons(message: Message) -> None:
     await message.answer("Ariza ostidagi tugmalardan foydalaning: tasdiqlash, o'zgartirish yoki bekor qilish.")
 
 
-@router.message(StateFilter(Form.full_name, Form.author_status, Form.workplace,
+@router.message(StateFilter(Form.full_name, Form.phone, Form.author_status, Form.workplace,
                             Form.topic, Form.field_custom, Form.language))
 async def form_not_text(message: Message) -> None:
     await message.answer("Iltimos, javobni matn ko'rinishida yuboring.")
 
 
-# ---------- Чек и статья (состояние в БД) ----------
+# ---------- Чек (состояние в БД) ----------
 
 @router.message(F.photo | F.document)
-async def got_file(message: Message, bot: Bot) -> None:
+async def got_receipt(message: Message, bot: Bot) -> None:
     app = db_latest(message.from_user.id)
-    if not app or app["state"] not in (ST_RECEIPT, ST_ARTICLE):
-        await message.answer("Bu bosqichda fayl yuborish talab qilinmaydi. /status orqali holatni tekshiring.")
+    if not app or app["state"] != ST_RECEIPT:
+        await message.answer(
+            f"Bu bosqichda fayl yuborish talab qilinmaydi. Yangi ariza uchun «{BTN_NEW}» tugmasini bosing.",
+            reply_markup=main_kb(),
+        )
         return
-    if app["state"] == ST_RECEIPT:
-        await got_receipt(message, bot, app)
-    else:
-        await got_article(message, bot, app)
-
-
-async def got_receipt(message: Message, bot: Bot, app: sqlite3.Row) -> None:
     if message.photo:
         file_id, file_type = message.photo[-1].file_id, "photo"
     else:
@@ -607,28 +644,6 @@ async def got_receipt(message: Message, bot: Bot, app: sqlite3.Row) -> None:
     )
 
 
-async def got_article(message: Message, bot: Bot, app: sqlite3.Row) -> None:
-    doc = message.document
-    name = (doc.file_name or "").lower() if doc else ""
-    if not name.endswith((".doc", ".docx")):
-        await message.answer("❌ Noto'g'ri format. Maqolani faqat DOC yoki DOCX formatida yuboring.")
-        return
-
-    db_update(app["id"], state=ST_DONE, article_status="✅ qabul qilingan", article_file_id=doc.file_id)
-    app = db_get(app["id"])
-    await message.answer(
-        f"✅ <b>Maqolangiz muvaffaqiyatli qabul qilindi.</b>\n\nAriza raqami: <b>№{app['id']}</b>\n\n"
-        "Maqolangiz tahririyat tomonidan ko'rib chiqiladi.",
-        reply_markup=main_kb(),
-    )
-    await notify_editors(
-        bot,
-        f"📄 <b>YANGI MAQOLA QABUL QILINDI</b>\n\n{app_summary(app)}\n\n👤 Telegram: {user_contact(app)}",
-        doc.file_id, "document",
-        caption=f"Ariza №{app['id']} — maqola",
-    )
-
-
 # ---------- Решение администратора по оплате ----------
 
 @router.callback_query(F.data.regexp(r"^pay_(ok|no):\d+$"))
@@ -645,11 +660,10 @@ async def admin_payment(call: CallbackQuery, bot: Bot) -> None:
     await call.answer()
 
     if action == "pay_ok":
-        db_update(app["id"], state=ST_ARTICLE, payment_status="✅ tasdiqlangan")
+        db_update(app["id"], state=ST_DONE, payment_status="✅ tasdiqlangan")
         user_text = (
-            f"✅ <b>TO'LOV TASDIQLANDI</b>\n\nHurmatli {e(app['full_name'])}, to'lovingiz "
-            f"(ariza №{app['id']}) administrator tomonidan tasdiqlandi.\n\n"
-            "Endi ilmiy maqolangizni <b>DOC yoki DOCX</b> formatida yuboring."
+            f"✅ <b>Chek qabul qilindi, to'lov tasdiqlandi.</b>\n\n"
+            f"Hurmatli {e(app['full_name'])}, ariza №{app['id']} bo'yicha maqolangizni kuting."
         )
         admin_text = f"✅ Ariza №{app['id']}: to'lov tasdiqlandi."
     else:
@@ -677,7 +691,6 @@ async def fallback(message: Message) -> None:
     hints = {
         ST_RECEIPT: "Iltimos, to'lov chekini rasm yoki PDF fayl ko'rinishida yuboring.",
         ST_REVIEW: "⏳ Chekingiz administrator tekshiruvida. Iltimos, natijani kuting.",
-        ST_ARTICLE: "To'lov tasdiqlangan. Endi maqolangizni DOC yoki DOCX formatida yuboring.",
     }
     text = hints.get(app["state"]) if app else None
     await message.answer(text or f"Maqola topshirish uchun «{BTN_NEW}» tugmasini bosing.", reply_markup=main_kb())
