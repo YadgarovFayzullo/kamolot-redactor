@@ -317,7 +317,7 @@ async def ask(message: Message, state: FSMContext, step: str) -> None:
         await state.set_state(Form.full_name)
         await message.answer(
             head + "Muallifning familiyasi, ismi va otasining ismini to'liq kiriting.\n\n"
-            "<i>Masalan: Sattorov Mirshod Erkinovich</i>",
+            "<i>Nayimov Azizbek Alisherovich</i>",
             reply_markup=cancel_kb(),
         )
     elif step == "author_status":
@@ -458,7 +458,7 @@ async def got_full_name(message: Message, state: FSMContext) -> None:
     if not FIO_RE.match(value) or len(value) > 150:
         await message.answer(
             "F.I.Sh.ni harflar bilan to'liq kiriting (kamida familiya va ism).\n"
-            "<i>Masalan: Sattorov Mirshod Erkinovich</i>"
+            "<i>Nayimov Azizbek Alisherovich</i>"
         )
         return
     await save_and_next(message, state, full_name=value)
