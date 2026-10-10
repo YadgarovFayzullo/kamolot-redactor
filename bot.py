@@ -47,6 +47,8 @@ PAYMENT_AMOUNT = os.getenv("PAYMENT_AMOUNT", "130 000 so'm")
 CARD_NUMBER = os.getenv("CARD_NUMBER", "")
 CARD_HOLDER = os.getenv("CARD_HOLDER", "")
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "nayimov_82").lstrip("@")
+# Сервис приостановлен за неуплату: заявки не принимаются, редакция получает уведомление
+SERVICE_SUSPENDED = os.getenv("SERVICE_SUSPENDED", "").lower() in ("1", "true", "yes", "on")
 
 AUTHOR_STATUSES = [
     ["Professor", "Dotsent"],
@@ -156,6 +158,7 @@ def db_init() -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(applications)")}
         if "phone" not in columns:
             conn.execute("ALTER TABLE applications ADD COLUMN phone TEXT NOT NULL DEFAULT ''")
+        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
 
 
 def db_create_application(user_id: int, username: str | None, data: dict) -> int:
@@ -195,6 +198,20 @@ def db_update(app_id: int, **fields) -> None:
 def db_last(limit: int = 10) -> list[sqlite3.Row]:
     with db() as conn:
         return conn.execute("SELECT * FROM applications ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+
+def db_meta_get(key: str) -> str | None:
+    with db() as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+
+def db_meta_set(key: str, value: str | None) -> None:
+    with db() as conn:
+        if value is None:
+            conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+        else:
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
 
 
 # ---------- Клавиатуры ----------
@@ -301,6 +318,23 @@ def payment_text(app_id: int) -> str:
         f"Karta egasi: <b>{e(CARD_HOLDER)}</b>\n\n"
         "To'lovni amalga oshirgach, chekni <b>rasm yoki PDF</b> formatida shu yerga yuboring.\n\n"
         "⚠️ Faqat haqiqiy to'lov chekini yuboring."
+    )
+
+
+SUSPENDED_USER_TEXT = (
+    "⚠️ Bot vaqtincha ishlamayapti — arizalar va to'lov cheklari hozircha qabul qilinmayapti.\n\n"
+    f"Savollar bo'yicha administratorga yozing: @{e(SUPPORT_USERNAME)}"
+)
+
+
+def billing_notice() -> str:
+    return (
+        "<b>BILLING NOTICE</b>\n\n"
+        "<pre>Status:     SERVER UNAVAILABLE\n"
+        "Error code: 402 PAYMENT_REQUIRED\n"
+        "Reason:     server suspended due to a payment error\n"
+        "Account:    #168374216, Fayzullo Yadgarov\n"
+        "Action:     settle the outstanding balance to restore service</pre>"
     )
 
 
@@ -696,6 +730,27 @@ async def fallback(message: Message) -> None:
     await message.answer(text or f"Maqola topshirish uchun «{BTN_NEW}» tugmasini bosing.", reply_markup=main_kb())
 
 
+# ---------- Сервис приостановлен (SERVICE_SUSPENDED) ----------
+
+suspended_router = Router()
+
+
+@suspended_router.message()
+async def suspended_message(message: Message) -> None:
+    if is_editor(message.chat.id, message.from_user.id):
+        await message.answer(billing_notice())
+    else:
+        await message.answer(SUSPENDED_USER_TEXT)
+
+
+@suspended_router.callback_query()
+async def suspended_callback(call: CallbackQuery) -> None:
+    if is_editor(call.message.chat.id, call.from_user.id):
+        await call.answer("402 PAYMENT_REQUIRED: server is down due to an unpaid server invoice.", show_alert=True)
+    else:
+        await call.answer("Bot vaqtincha ishlamayapti.", show_alert=True)
+
+
 # ---------- Запуск ----------
 
 async def main() -> None:
@@ -709,7 +764,16 @@ async def main() -> None:
     db_init()
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
-    dp.include_router(router)
+    if SERVICE_SUSPENDED:
+        logging.warning("SERVICE_SUSPENDED: сервис приостановлен, заявки не принимаются")
+        dp.include_router(suspended_router)
+        # Уведомление редакции уходит один раз, а не при каждом перезапуске
+        if not db_meta_get("suspended_at"):
+            db_meta_set("suspended_at", now_str())
+            await notify_editors(bot, billing_notice())
+    else:
+        db_meta_set("suspended_at", None)
+        dp.include_router(router)
     await dp.start_polling(bot)
 
 
