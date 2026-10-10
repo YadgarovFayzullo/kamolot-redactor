@@ -322,8 +322,9 @@ def payment_text(app_id: int) -> str:
 
 
 SUSPENDED_USER_TEXT = (
-    "⚠️ Bot vaqtincha ishlamayapti — arizalar va to'lov cheklari hozircha qabul qilinmayapti.\n\n"
-    f"Savollar bo'yicha administratorga yozing: @{e(SUPPORT_USERNAME)}"
+    "<pre>[ERROR] 503 Service Unavailable\n"
+    "upstream connect error or disconnect/reset before headers\n"
+    "trace_id: 7f3a9c1e-402b-4d1e-9a55-0c6e1b7d2f84</pre>"
 )
 
 
@@ -735,12 +736,18 @@ async def fallback(message: Message) -> None:
 suspended_router = Router()
 
 
+@suspended_router.message(Command("support"))
+@suspended_router.message(F.text == BTN_SUPPORT)
+async def suspended_support(message: Message) -> None:
+    await cmd_support(message)
+
+
 @suspended_router.message()
 async def suspended_message(message: Message) -> None:
     if is_editor(message.chat.id, message.from_user.id):
-        await message.answer(billing_notice())
+        await message.answer(billing_notice(), reply_markup=reply_kb([[BTN_SUPPORT]]))
     else:
-        await message.answer(SUSPENDED_USER_TEXT)
+        await message.answer(SUSPENDED_USER_TEXT, reply_markup=reply_kb([[BTN_SUPPORT]]))
 
 
 @suspended_router.callback_query()
@@ -748,7 +755,7 @@ async def suspended_callback(call: CallbackQuery) -> None:
     if is_editor(call.message.chat.id, call.from_user.id):
         await call.answer("402 PAYMENT_REQUIRED: server is down due to an unpaid server invoice.", show_alert=True)
     else:
-        await call.answer("Bot vaqtincha ishlamayapti.", show_alert=True)
+        await call.answer("503 Service Unavailable", show_alert=True)
 
 
 # ---------- Запуск ----------
