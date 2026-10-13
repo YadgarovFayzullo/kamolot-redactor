@@ -97,6 +97,9 @@ STATE_LABELS = {
 BTN_NEW = "📝 Maqola topshirish"
 BTN_CANCEL = "❌ Bekor qilish"
 BTN_SUPPORT = "🆘 Yordam"
+# Кнопки редакции
+BTN_QUEUE = "⏳ Cheklar navbati"
+BTN_ORDERS = "📋 Arizalar"
 
 router = Router()
 
@@ -200,6 +203,13 @@ def db_last(limit: int = 10) -> list[sqlite3.Row]:
         return conn.execute("SELECT * FROM applications ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
 
 
+def db_by_state(state: str, limit: int = 10) -> list[sqlite3.Row]:
+    with db() as conn:
+        return conn.execute(
+            "SELECT * FROM applications WHERE state = ? ORDER BY id LIMIT ?", (state, limit)
+        ).fetchall()
+
+
 def db_meta_get(key: str) -> str | None:
     with db() as conn:
         row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
@@ -222,8 +232,11 @@ def reply_kb(rows: list[list[str]]) -> ReplyKeyboardMarkup:
     )
 
 
-def main_kb() -> ReplyKeyboardMarkup:
-    return reply_kb([[BTN_NEW], [BTN_SUPPORT]])
+def main_kb(user_id: int | None = None) -> ReplyKeyboardMarkup:
+    rows = [[BTN_NEW], [BTN_SUPPORT]]
+    if user_id in EDITOR_CHAT_IDS:
+        rows.append([BTN_QUEUE, BTN_ORDERS])
+    return reply_kb(rows)
 
 
 def cancel_kb() -> ReplyKeyboardMarkup:
@@ -433,7 +446,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     await message.answer(
         f"Assalomu alaykum!\n\n<b>{e(JOURNAL_NAME)}</b> rasmiy Telegram botiga xush kelibsiz.\n\n"
         "Bot orqali ilmiy maqolangizni jurnalga topshirishingiz mumkin.",
-        reply_markup=main_kb(),
+        reply_markup=main_kb(message.from_user.id),
     )
 
 
@@ -468,7 +481,7 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
     app = db_latest(message.from_user.id)
     if not in_form and app and app["state"] == ST_RECEIPT:
         db_update(app["id"], state=ST_CANCELLED)
-    await message.answer("Jarayon bekor qilindi.", reply_markup=main_kb())
+    await message.answer("Jarayon bekor qilindi.", reply_markup=main_kb(message.from_user.id))
 
 
 @router.message(Command("new"))
@@ -484,6 +497,7 @@ async def cmd_myid(message: Message) -> None:
 
 
 @router.message(Command("orders"))
+@router.message(F.text == BTN_ORDERS)
 async def cmd_orders(message: Message) -> None:
     if not is_editor(message.chat.id, message.from_user.id):
         return
@@ -497,6 +511,31 @@ async def cmd_orders(message: Message) -> None:
         for r in rows
     )
     await message.answer(f"Oxirgi arizalar:\n\n{text}")
+
+
+@router.message(Command("queue"))
+@router.message(F.text == BTN_QUEUE)
+async def cmd_queue(message: Message) -> None:
+    """Очередь: заявки с чеком, который ждёт решения, — по одной, с кнопками подтверждения."""
+    if not is_editor(message.chat.id, message.from_user.id):
+        return
+    rows = db_by_state(ST_REVIEW)
+    if not rows:
+        await message.answer("✅ Navbat bo'sh — tekshirilishi kerak cheklar yo'q.")
+        return
+    await message.answer(f"⏳ Tekshirilishi kerak cheklar: <b>{len(rows)}</b>")
+    for app in rows:
+        text = f"{app_summary(app)}\n\n👤 Telegram: {user_contact(app)}"
+        kb = payment_admin_kb(app["id"])
+        caption = f"Ariza №{app['id']} — to'lov cheki"
+        if app["receipt_type"] == "photo":
+            await message.answer(text)
+            await message.answer_photo(app["receipt_file_id"], caption=caption, reply_markup=kb)
+        elif app["receipt_type"] == "document":
+            await message.answer(text)
+            await message.answer_document(app["receipt_file_id"], caption=caption, reply_markup=kb)
+        else:
+            await message.answer(text, reply_markup=kb)
 
 
 # ---------- Анкета ----------
@@ -617,7 +656,7 @@ async def confirm_cancel(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await call.answer()
     await call.message.edit_reply_markup(reply_markup=None)
-    await call.message.answer("Ariza bekor qilindi.", reply_markup=main_kb())
+    await call.message.answer("Ariza bekor qilindi.", reply_markup=main_kb(call.from_user.id))
 
 
 @router.callback_query(Form.confirm, F.data == "confirm:send")
@@ -628,7 +667,7 @@ async def confirm_send(call: CallbackQuery, state: FSMContext) -> None:
     await call.answer()
     await call.message.edit_reply_markup(reply_markup=None)
     await call.message.answer(f"📝 Ariza №{app_id} yaratildi.")
-    await call.message.answer(payment_text(app_id), reply_markup=main_kb())
+    await call.message.answer(payment_text(app_id), reply_markup=main_kb(call.from_user.id))
 
 
 @router.message(Form.confirm)
@@ -650,7 +689,7 @@ async def got_receipt(message: Message, bot: Bot) -> None:
     if not app or app["state"] != ST_RECEIPT:
         await message.answer(
             f"Bu bosqichda fayl yuborish talab qilinmaydi. Yangi ariza uchun «{BTN_NEW}» tugmasini bosing.",
-            reply_markup=main_kb(),
+            reply_markup=main_kb(message.from_user.id),
         )
         return
     if message.photo:
@@ -668,7 +707,7 @@ async def got_receipt(message: Message, bot: Bot) -> None:
     await message.answer(
         f"✅ Ariza №{app['id']}: chekingiz qabul qilindi va administrator tekshiruviga yuborildi.\n\n"
         "Natija tasdiqlangach, sizga bot orqali xabar keladi.",
-        reply_markup=main_kb(),
+        reply_markup=main_kb(message.from_user.id),
     )
     await notify_editors(
         bot,
@@ -728,7 +767,7 @@ async def fallback(message: Message) -> None:
         ST_REVIEW: "⏳ Ariza №{id}: chekingiz administrator tekshiruvida. Iltimos, natijani kuting.",
     }
     text = hints[app["state"]].format(id=app["id"]) if app and app["state"] in hints else None
-    await message.answer(text or f"Maqola topshirish uchun «{BTN_NEW}» tugmasini bosing.", reply_markup=main_kb())
+    await message.answer(text or f"Maqola topshirish uchun «{BTN_NEW}» tugmasini bosing.", reply_markup=main_kb(message.from_user.id))
 
 
 # ---------- Сервис приостановлен (SERVICE_SUSPENDED) ----------
