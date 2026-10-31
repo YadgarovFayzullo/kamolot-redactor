@@ -1,0 +1,24 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency: deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+      - name: Upload and restart
+        run: |
+          scp bot.py requirements.txt Dockerfile docker-compose.yml root@81.31.246.252:/opt/apps/redactor-bot/
+          ssh root@81.31.246.252 'cd /opt/apps/redactor-bot && docker compose up -d --build && sleep 8 && docker inspect -f "{{.State.Status}}" redactor-bot'
