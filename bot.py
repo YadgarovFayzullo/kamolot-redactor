@@ -58,6 +58,15 @@ AUTHOR_STATUSES = [
     ["Boshqa"],
 ]
 
+PUB_TYPES = [
+    "Xalqaro tezis",
+    "Respublika tezis",
+    "Xalqaro ilmiy maqola",
+    "Respublika ilmiy maqola",
+    "Mahaliy (OAK) ilmiy jurnal",
+    "Magistrlik dissertatsiyasi yozishga yordam",
+]
+
 LANGUAGES = [
     ["🇺🇿 O'zbek", "🇷🇺 Rus"],
     ["🇬🇧 Ingliz", "🇹🇷 Turk"],
@@ -110,6 +119,7 @@ class Form(StatesGroup):
     full_name = State()
     phone = State()
     author_status = State()
+    pub_type = State()
     workplace = State()
     topic = State()
     field = State()
@@ -118,7 +128,7 @@ class Form(StatesGroup):
     confirm = State()
 
 
-FORM_ORDER = ["full_name", "phone", "author_status", "workplace", "topic", "field", "language"]
+FORM_ORDER = ["full_name", "phone", "author_status", "workplace", "topic", "pub_type", "field", "language"]
 
 
 # ---------- База данных ----------
@@ -161,17 +171,19 @@ def db_init() -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(applications)")}
         if "phone" not in columns:
             conn.execute("ALTER TABLE applications ADD COLUMN phone TEXT NOT NULL DEFAULT ''")
+        if "pub_type" not in columns:
+            conn.execute("ALTER TABLE applications ADD COLUMN pub_type TEXT NOT NULL DEFAULT ''")
         conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
 
 
 def db_create_application(user_id: int, username: str | None, data: dict) -> int:
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO applications (telegram_id, username, full_name, phone, author_status, workplace, "
-            "topic, field, language, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO applications (telegram_id, username, full_name, phone, author_status, pub_type, workplace, "
+            "topic, field, language, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 user_id, username or "",
-                data["full_name"], data["phone"], data["author_status"], data["workplace"],
+                data["full_name"], data["phone"], data["author_status"], data["pub_type"], data["workplace"],
                 data["topic"], data["field"], data["language"],
                 ST_RECEIPT, now_str(), now_str(),
             ),
@@ -263,6 +275,15 @@ def fields_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def pub_types_kb(selected: list[int]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=("✅ " if i in selected else "▫️ ") + t, callback_data=f"pt:{i}")]
+        for i, t in enumerate(PUB_TYPES)
+    ]
+    rows.append([InlineKeyboardButton(text="➡️ Davom etish", callback_data="pt:done")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def confirm_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Tasdiqlash va to'lovga o'tish", callback_data="confirm:send")],
@@ -270,7 +291,10 @@ def confirm_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="✏️ F.I.Sh.", callback_data="edit:full_name"),
             InlineKeyboardButton(text="✏️ Telefon", callback_data="edit:phone"),
         ],
-        [InlineKeyboardButton(text="✏️ Maqom", callback_data="edit:author_status")],
+        [
+            InlineKeyboardButton(text="✏️ Maqom", callback_data="edit:author_status"),
+            InlineKeyboardButton(text="✏️ Xizmatlar", callback_data="edit:pub_type"),
+        ],
         [
             InlineKeyboardButton(text="✏️ Ish joyi", callback_data="edit:workplace"),
             InlineKeyboardButton(text="✏️ Mavzu", callback_data="edit:topic"),
@@ -302,8 +326,9 @@ def form_summary(data: dict) -> str:
         f"👤 <b>F.I.Sh.:</b> {e(data['full_name'])}\n"
         f"📱 <b>Telefon:</b> {e(data.get('phone') or '-')}\n"
         f"🎓 <b>Maqomi:</b> {e(data['author_status'])}\n"
-        f"🏢 <b>Ish/o'qish joyi:</b> {e(data['workplace'])}\n"
+                f"🏢 <b>Ish/o'qish joyi:</b> {e(data['workplace'])}\n"
         f"📝 <b>Maqola mavzusi:</b> {e(data['topic'])}\n"
+        f"📄 <b>Xizmatlar:</b> {e(data.get('pub_type') or '-')}\n"
         f"🔬 <b>Ilmiy soha:</b> {e(data['field'])}\n"
         f"🌐 <b>Til:</b> {e(data['language'])}"
     )
@@ -326,9 +351,7 @@ def payment_text(app_id: int) -> str:
     return (
         f"💳 <b>To'lov ma'lumotlari (ariza №{app_id})</b>\n\n"
         f"Jurnal: <b>{e(JOURNAL_NAME)}</b>\n"
-        f"To'lov: <b>{e(PAYMENT_AMOUNT)}</b>\n"
-        f"Karta: <code>{e(CARD_NUMBER)}</code>\n"
-        f"Karta egasi: <b>{e(CARD_HOLDER)}</b>\n\n"
+        "\n"
         "To'lovni amalga oshirgach, chekni <b>rasm yoki PDF</b> formatida shu yerga yuboring.\n\n"
         "⚠️ Faqat haqiqiy to'lov chekini yuboring."
     )
@@ -393,6 +416,13 @@ async def ask(message: Message, state: FSMContext, step: str) -> None:
     elif step == "author_status":
         await state.set_state(Form.author_status)
         await message.answer(head + "Maqomingizni tanlang:", reply_markup=reply_kb(AUTHOR_STATUSES + [[BTN_CANCEL]]))
+    elif step == "pub_type":
+        await state.set_state(Form.pub_type)
+        await state.update_data(pub_sel=[])
+        await message.answer(
+            head + "Kerakli xizmat(lar)ni tanlang — bir nechtasini belgilash mumkin, so'ng «Davom etish» tugmasini bosing:",
+            reply_markup=pub_types_kb([]),
+        )
     elif step == "workplace":
         await state.set_state(Form.workplace)
         await message.answer(
@@ -579,6 +609,31 @@ async def got_phone_text(message: Message, state: FSMContext) -> None:
     await save_and_next(message, state, phone="+" + digits)
 
 
+@router.message(Form.pub_type)
+async def pub_type_use_buttons(message: Message) -> None:
+    await message.answer("Xizmatni yuqoridagi tugmalar orqali tanlang.")
+
+
+@router.callback_query(Form.pub_type, F.data.startswith("pt:"))
+async def pub_type_toggle(call: CallbackQuery, state: FSMContext) -> None:
+    action = call.data.split(":", 1)[1]
+    selected = (await state.get_data()).get("pub_sel", [])
+    if action == "done":
+        if not selected:
+            await call.answer("Kamida bitta xizmatni tanlang", show_alert=True)
+            return
+        await call.answer()
+        await call.message.edit_reply_markup(reply_markup=None)
+        value = ", ".join(PUB_TYPES[i] for i in sorted(selected))
+        await save_and_next(call.message, state, pub_type=value)
+        return
+    i = int(action)
+    selected = [x for x in selected if x != i] if i in selected else [*selected, i]
+    await state.update_data(pub_sel=selected)
+    await call.answer()
+    await call.message.edit_reply_markup(reply_markup=pub_types_kb(selected))
+
+
 @router.message(Form.author_status, F.text)
 async def got_author_status(message: Message, state: FSMContext) -> None:
     value = clean(message.text)
@@ -675,7 +730,7 @@ async def confirm_use_buttons(message: Message) -> None:
     await message.answer("Ariza ostidagi tugmalardan foydalaning: tasdiqlash, o'zgartirish yoki bekor qilish.")
 
 
-@router.message(StateFilter(Form.full_name, Form.phone, Form.author_status, Form.workplace,
+@router.message(StateFilter(Form.full_name, Form.phone, Form.author_status, Form.pub_type, Form.workplace,
                             Form.topic, Form.field_custom, Form.language))
 async def form_not_text(message: Message) -> None:
     await message.answer("Iltimos, javobni matn ko'rinishida yuboring.")
@@ -803,8 +858,6 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN не задан (см. .env.example)")
-    if not CARD_NUMBER:
-        logging.warning("CARD_NUMBER не задан — авторы не увидят реквизиты оплаты")
     if not EDITOR_CHAT_IDS:
         logging.warning("EDITOR_CHAT_IDS не задан — некому подтверждать оплату")
     db_init()
