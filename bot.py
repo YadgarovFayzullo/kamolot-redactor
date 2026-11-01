@@ -92,6 +92,7 @@ SCIENCE_FIELDS = [
 ST_RECEIPT = "receipt"          # ждём чек
 ST_REVIEW = "payment_review"    # чек у администратора
 ST_ARTICLE = "article"          # устаревшее: раньше ждали файл статьи
+ST_NEW = "new"                  # заявка принята, оплата не запрашивается
 ST_DONE = "done"
 ST_CANCELLED = "cancelled"
 
@@ -99,6 +100,7 @@ STATE_LABELS = {
     ST_RECEIPT: "💳 To'lov cheki kutilmoqda",
     ST_REVIEW: "⏳ Chek tekshirilmoqda",
     ST_ARTICLE: "📄 Maqola fayli kutilmoqda",
+    ST_NEW: "🆕 Yangi ariza",
     ST_DONE: "✅ To'lov tasdiqlangan",
     ST_CANCELLED: "❌ Bekor qilingan",
 }
@@ -185,7 +187,7 @@ def db_create_application(user_id: int, username: str | None, data: dict) -> int
                 user_id, username or "",
                 data["full_name"], data["phone"], data["author_status"], data["pub_type"], data["workplace"],
                 data["topic"], data["field"], data["language"],
-                ST_RECEIPT, now_str(), now_str(),
+                ST_NEW, now_str(), now_str(),
             ),
         )
         return cur.lastrowid
@@ -347,15 +349,6 @@ def user_contact(app: sqlite3.Row) -> str:
     return f'<a href="tg://user?id={app["telegram_id"]}">profil</a>'
 
 
-def payment_text(app_id: int) -> str:
-    return (
-        f"💳 <b>To'lov ma'lumotlari (ariza №{app_id})</b>\n\n"
-        f"Jurnal: <b>{e(JOURNAL_NAME)}</b>\n"
-        "\n"
-        "To'lovni amalga oshirgach, chekni <b>rasm yoki PDF</b> formatida shu yerga yuboring.\n\n"
-        "⚠️ Faqat haqiqiy to'lov chekini yuboring."
-    )
-
 
 SUSPENDED_USER_TEXT = (
     "<pre>[ERROR] 503 Service Unavailable\n"
@@ -488,7 +481,7 @@ async def cmd_help(message: Message) -> None:
         "/new — yangi maqola topshirish\n"
         "/cancel — joriy jarayonni bekor qilish\n"
         f"/support — administrator bilan bog'lanish (@{e(SUPPORT_USERNAME)})\n\n"
-        "Savollarga ketma-ket javob bering. To'lov chekini rasm yoki PDF ko'rinishida yuboring."
+        "Savollarga ketma-ket javob bering. Ariza qabul qilingach, tahririyat siz bilan bog'lanadi."
     )
 
 
@@ -715,14 +708,20 @@ async def confirm_cancel(call: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(Form.confirm, F.data == "confirm:send")
-async def confirm_send(call: CallbackQuery, state: FSMContext) -> None:
+async def confirm_send(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     data = await state.get_data()
     app_id = db_create_application(call.from_user.id, call.from_user.username, data)
     await state.clear()
     await call.answer()
     await call.message.edit_reply_markup(reply_markup=None)
-    await call.message.answer(f"📝 Ariza №{app_id} yaratildi.")
-    await call.message.answer(payment_text(app_id), reply_markup=main_kb(call.from_user.id))
+    await call.message.answer(
+        f"✅ Arizangiz qabul qilindi (№{app_id}). Qisqa vaqt oralig'ida tahririyatimiz siz bilan bog'lanadi.",
+        reply_markup=main_kb(call.from_user.id),
+    )
+    app = db_get(app_id)
+    await notify_editors(
+        bot, f"🆕 <b>YANGI ARIZA</b>\n\n{app_summary(app)}\n\n👤 Telegram: {user_contact(app)}"
+    )
 
 
 @router.message(Form.confirm)
