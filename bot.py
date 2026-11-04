@@ -170,6 +170,15 @@ def db_init() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admins (
+                telegram_id INTEGER PRIMARY KEY,
+                added_by    INTEGER,
+                created_at  TEXT NOT NULL
+            )
+            """
+        )
         columns = {row[1] for row in conn.execute("PRAGMA table_info(applications)")}
         if "phone" not in columns:
             conn.execute("ALTER TABLE applications ADD COLUMN phone TEXT NOT NULL DEFAULT ''")
@@ -240,6 +249,29 @@ def db_meta_set(key: str, value: str | None) -> None:
 
 # ---------- Клавиатуры ----------
 
+def db_admin_ids() -> list[int]:
+    """Все администраторы: из .env (главные) + добавленные через бота."""
+    with db() as conn:
+        extra = [row[0] for row in conn.execute("SELECT telegram_id FROM admins ORDER BY created_at")]
+    return list(dict.fromkeys([*EDITOR_CHAT_IDS, *extra]))
+
+
+def db_admin_add(admin_id: int, added_by: int) -> bool:
+    if admin_id in db_admin_ids():
+        return False
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO admins (telegram_id, added_by, created_at) VALUES (?, ?, ?)",
+            (admin_id, added_by, now_str()),
+        )
+    return True
+
+
+def db_admin_remove(admin_id: int) -> bool:
+    with db() as conn:
+        return conn.execute("DELETE FROM admins WHERE telegram_id = ?", (admin_id,)).rowcount > 0
+
+
 def reply_kb(rows: list[list[str]]) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=t) for t in row] for row in rows], resize_keyboard=True
@@ -248,7 +280,7 @@ def reply_kb(rows: list[list[str]]) -> ReplyKeyboardMarkup:
 
 def main_kb(user_id: int | None = None) -> ReplyKeyboardMarkup:
     rows = [[BTN_NEW], [BTN_SUPPORT]]
-    if user_id in EDITOR_CHAT_IDS:
+    if user_id in db_admin_ids():
         rows.append([BTN_QUEUE, BTN_ORDERS])
     return reply_kb(rows)
 
@@ -369,13 +401,14 @@ def billing_notice() -> str:
 
 
 def is_editor(chat_id: int, user_id: int) -> bool:
-    return chat_id in EDITOR_CHAT_IDS or user_id in EDITOR_CHAT_IDS
+    ids = db_admin_ids()
+    return chat_id in ids or user_id in ids
 
 
 async def notify_editors(bot: Bot, text: str, file_id: str | None = None, file_type: str | None = None,
                          caption: str = "", reply_markup: InlineKeyboardMarkup | None = None) -> None:
     """Отправляет редакторам текст заявки и (опционально) файл с кнопками под ним."""
-    for chat_id in EDITOR_CHAT_IDS:
+    for chat_id in db_admin_ids():
         try:
             await bot.send_message(chat_id, text, reply_markup=None if file_id else reply_markup)
             if file_type == "photo":
@@ -559,6 +592,59 @@ async def cmd_queue(message: Message) -> None:
             await message.answer_document(app["receipt_file_id"], caption=caption, reply_markup=kb)
         else:
             await message.answer(text, reply_markup=kb)
+
+
+@router.message(Command("admins"))
+async def cmd_admins(message: Message) -> None:
+    if not is_editor(message.chat.id, message.from_user.id):
+        return
+    lines = [
+        f"• <code>{i}</code>" + (" (asosiy)" if i in EDITOR_CHAT_IDS else "")
+        for i in db_admin_ids()
+    ]
+    await message.answer(
+        f"Administratorlar ({len(lines)}):\n" + "\n".join(lines)
+        + "\n\n/addadmin <code>ID</code> — qo'shish\n/deladmin <code>ID</code> — o'chirish"
+    )
+
+
+def parse_admin_id(message: Message) -> int | None:
+    parts = (message.text or "").split()
+    return int(parts[1]) if len(parts) == 2 and parts[1].lstrip("-").isdigit() else None
+
+
+@router.message(Command("addadmin"))
+async def cmd_addadmin(message: Message, bot: Bot) -> None:
+    if not is_editor(message.chat.id, message.from_user.id):
+        return
+    admin_id = parse_admin_id(message)
+    if admin_id is None:
+        await message.answer("Foydalanish: /addadmin <code>ID</code>\nID ni /myid buyrug'i orqali bilib olish mumkin.")
+        return
+    if not db_admin_add(admin_id, message.from_user.id):
+        await message.answer(f"<code>{admin_id}</code> allaqachon administrator.")
+        return
+    text = f"✅ <code>{admin_id}</code> administrator sifatida qo'shildi."
+    try:
+        await bot.send_message(admin_id, "Siz botda administrator etib tayinlandingiz. /orders — arizalar ro'yxati.")
+    except Exception:
+        text += "\n⚠️ Unga xabar yuborib bo'lmadi: u botda /start bosishi kerak, aks holda cheklar kelmaydi."
+    await message.answer(text)
+
+
+@router.message(Command("deladmin"))
+async def cmd_deladmin(message: Message) -> None:
+    if not is_editor(message.chat.id, message.from_user.id):
+        return
+    admin_id = parse_admin_id(message)
+    if admin_id is None:
+        await message.answer("Foydalanish: /deladmin <code>ID</code>")
+    elif admin_id in EDITOR_CHAT_IDS:
+        await message.answer("Asosiy administratorni (.env) bot orqali o'chirib bo'lmaydi.")
+    elif db_admin_remove(admin_id):
+        await message.answer(f"🗑 <code>{admin_id}</code> administratorlardan o'chirildi.")
+    else:
+        await message.answer(f"<code>{admin_id}</code> administratorlar ro'yxatida yo'q.")
 
 
 # ---------- Анкета ----------
@@ -857,9 +943,9 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN не задан (см. .env.example)")
-    if not EDITOR_CHAT_IDS:
-        logging.warning("EDITOR_CHAT_IDS не задан — некому подтверждать оплату")
     db_init()
+    if not db_admin_ids():
+        logging.warning("Нет администраторов (EDITOR_CHAT_IDS пуст и таблица admins пуста) — некому подтверждать оплату")
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
     if SERVICE_SUSPENDED:
